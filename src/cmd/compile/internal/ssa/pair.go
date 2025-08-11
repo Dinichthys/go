@@ -225,6 +225,27 @@ func pairStores(f *Func) {
 		return m
 	}
 
+	// storeWidth returns the width of store,
+	// or 0 if it is not a store
+	storeWidth := func(op Op) int64 {
+		var width int64
+		switch op {
+		case OpARM64MOVDstore, OpARM64FMOVDstore:
+			width = 8
+		case OpARM64MOVWstore, OpARM64FMOVSstore:
+			width = 4
+		case OpARM64MOVHstore:
+			width = 2
+		case OpARM64MOVBstore:
+			width = 1
+		default:
+			width = 0
+		}
+		return width
+	}
+
+	const limit = 10
+
 	for _, b := range f.Blocks {
 		// Find last store in block, so we can
 		// walk the stores last to first.
@@ -250,6 +271,54 @@ func pairStores(f *Func) {
 			}
 		}
 
+	reordering:
+		for v := lastMem; v != nil; v = prevStore(v) {
+			widthV := storeWidth(v.Op)
+			if widthV == 0 {
+				// Can't reorder with any other memory operations.
+				// (atomics, calls, ...)
+				continue
+			}
+			// Var 'count' keeps us in O(n) territory
+			for count, w := limit, prevStore(v); (count > 0) && (w != nil); count, w = count-1, prevStore(w) {
+				if w.Uses != 1 {
+					// We can't reorder stores if the earlier
+					// store has any use besides the next one
+					// in the store chain.
+					// (Unless we could check the aliasing of
+					// all those other uses.)
+					continue reordering
+				}
+
+				widthW := storeWidth(w.Op)
+				if widthW == 0 {
+					// Can't reorder with any other memory operations.
+					// (atomics, calls, ...)
+					continue reordering
+				}
+
+				// We only allow reordering with respect to other
+				// writes to the same pointer and aux, so we can
+				// compute the exact the aliasing relationship.
+				if w.Args[0] != v.Args[0] ||
+					w.Aux != v.Aux {
+					// Can't reorder with operation with incomparable destination memory pointer.
+					continue reordering
+				}
+				if overlap(w.AuxInt, widthW, v.AuxInt, widthV) {
+					// Aliases with the same slot with v's location.
+					continue reordering
+				}
+
+				// Reordering stores in increasing order of memory access
+				if v.AuxInt < w.AuxInt {
+					v.Op, w.Op = w.Op, v.Op
+					v.Args[1], w.Args[1] = w.Args[1], v.Args[1]
+					v.AuxInt, w.AuxInt = w.AuxInt, v.AuxInt
+				}
+			}
+		}
+
 		// Check all stores, from last to first.
 	memCheck:
 		for v := lastMem; v != nil; v = prevStore(v) {
@@ -269,7 +338,7 @@ func pairStores(f *Func) {
 			// Look for earlier store we can combine with.
 			lowerOk := true
 			higherOk := true
-			count := 10 // max lookback distance
+			count := limit // max lookback distance
 			for w := prevStore(v); w != nil; w = prevStore(w) {
 				if w.Uses != 1 {
 					// We can't combine stores if the earlier
