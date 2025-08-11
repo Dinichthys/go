@@ -315,6 +315,7 @@ func pairStores(f *Func) {
 					v.Op, w.Op = w.Op, v.Op
 					v.Args[1], w.Args[1] = w.Args[1], v.Args[1]
 					v.AuxInt, w.AuxInt = w.AuxInt, v.AuxInt
+					widthV = widthW
 				}
 			}
 		}
